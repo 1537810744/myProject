@@ -1,0 +1,15 @@
+# 不打包进构建上下文的文件（减小上下文、避免干扰）
+.git
+data
+*.db
+*.exe
+*.log
+准备.docx
+准备.pdf
+
+# 前端：node_modules 与本地构建产物不进上下文
+# （镜像内由 node 阶段重新 npm ci + build，产物经 --from=frontend 拷贝）
+web/frontend/node_modules
+web/static
+
+# 后端构建阶段不需要前端源码以外的部分；前端源码需要（web/frontend）

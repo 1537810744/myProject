@@ -1,0 +1,17 @@
+# docker-compose 编排（可选便捷方式，根目录 Dockerfile 单独也可完整运行）
+services:
+  deltacrypto:
+    build: .
+    container_name: deltacrypto
+    ports:
+      - "8080:8080"        # 宿主机 8080 -> 容器 8080，浏览器访问 http://localhost:8080
+    volumes:
+      - deltacrypto-data:/app/data   # SQLite 数据持久化（API 凭证、设置、持仓、日志）
+    environment:
+      - LISTEN_ADDR=0.0.0.0:8080
+      - DB_PATH=/app/data/deltacrypto.db
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+
+volumes:
+  deltacrypto-data:
