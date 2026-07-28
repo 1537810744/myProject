@@ -1,15 +1,15 @@
-// Package httpserver HTTP 服务层。
+// 【阅读顺序 16】HTTP 服务层（后端唯一对外的门）。
 //
-// 需求要点：
-//   - 为前端提供 RESTful API；
-//   - 不使用 JWT 鉴权，仅监听本机 localhost，前端页面无跨域问题（同源）；
-//   - 后端模块之间不走 HTTP（直接包调用），HTTP 只服务前端。
-//
-// 实现：仅用标准库 net/http，手写轻量路由，保持零额外依赖。
+// 本文件职责：把 7 个模块的方法包装成 RESTful API 给前端调用 + 托管前端静态文件。
+// 阅读目的：看 Run() 里的路由表即可——每个 URL 对应哪个模块的哪个方法，一目了然；
+// 处理器只做“解析参数 → 调模块 → 包 JSON”，不含业务逻辑。
+// 注意（需求约定）：HTTP 只服务前端；后端模块之间不走 HTTP，直接包内函数调用。
+// 无 JWT 鉴权，仅监听 localhost（个人本机工具）。
 package httpserver
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -65,7 +65,11 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/trade/logs", s.handleTradeLogs)   // GET 日志
 
 	// —— 模块 4：账户 ——
-	mux.HandleFunc("/api/account/overview", s.handleOverview) // GET 账户总览
+	mux.HandleFunc("/api/account/overview", s.handleOverview)     // GET 账户总览
+	mux.HandleFunc("/api/position/detail", s.handlePositionDetail) // GET 持仓详情（统计+双腿+敞口）
+	mux.HandleFunc("/api/position/fills", s.handlePositionFills)   // GET 成交记录
+	mux.HandleFunc("/api/position/funding", s.handlePositionFunding) // GET 资金费流水
+	mux.HandleFunc("/api/position/profit", s.handlePositionProfit)   // GET 收益曲线
 
 	// —— 模块 5：预警 ——
 	mux.HandleFunc("/api/alert/records", s.handleAlertRecords) // GET 预警记录
@@ -192,6 +196,52 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	respond(w, overview, err)
 }
 
+// handlePositionDetail 持仓详情（统计 + 双腿 + 敞口），?symbol=BTC/USDT
+func (s *Server) handlePositionDetail(w http.ResponseWriter, r *http.Request) {
+	symbol := r.URL.Query().Get("symbol")
+	if symbol == "" {
+		respondErr(w, errSymbolRequired)
+		return
+	}
+	// 打开详情页时顺带同步一次资金费流水（有凭证才生效，无凭证静默跳过）
+	s.account.SyncFundingPayments()
+	detail, err := s.account.PositionDetail(symbol)
+	respond(w, detail, err)
+}
+
+// handlePositionFills 成交记录，?symbol=
+func (s *Server) handlePositionFills(w http.ResponseWriter, r *http.Request) {
+	symbol := r.URL.Query().Get("symbol")
+	if symbol == "" {
+		respondErr(w, errSymbolRequired)
+		return
+	}
+	fills, err := s.trade.Fills(symbol, 200)
+	respond(w, fills, err)
+}
+
+// handlePositionFunding 资金费流水，?symbol=
+func (s *Server) handlePositionFunding(w http.ResponseWriter, r *http.Request) {
+	symbol := r.URL.Query().Get("symbol")
+	if symbol == "" {
+		respondErr(w, errSymbolRequired)
+		return
+	}
+	records, err := s.account.FundingRecords(symbol, 100)
+	respond(w, records, err)
+}
+
+// handlePositionProfit 收益曲线，?symbol=
+func (s *Server) handlePositionProfit(w http.ResponseWriter, r *http.Request) {
+	symbol := r.URL.Query().Get("symbol")
+	if symbol == "" {
+		respondErr(w, errSymbolRequired)
+		return
+	}
+	points, err := s.account.ProfitHistory(symbol, 500)
+	respond(w, points, err)
+}
+
 // ---------- 模块 5 处理器 ----------
 
 func (s *Server) handleAlertRecords(w http.ResponseWriter, r *http.Request) {
@@ -245,6 +295,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 func tradeRequestOf(symbol, action string, totalUSDT, atomUSDT float64) model.TradeRequest {
 	return model.TradeRequest{Symbol: symbol, Action: action, TotalUSDT: totalUSDT, AtomUSDT: atomUSDT}
 }
+
+// errSymbolRequired symbol 参数缺失错误（持仓详情接口共用）
+var errSymbolRequired = fmt.Errorf("缺少 symbol 参数")
 
 // ---------- 工具函数 ----------
 

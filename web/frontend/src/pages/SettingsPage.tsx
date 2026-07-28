@@ -1,4 +1,4 @@
-// 模块 7：设置页 —— 全部参数公开显示，保存即生效
+// 【阅读顺序 25g】模块 7：设置页 —— 全部参数按用途分组显示，保存即生效。
 import { useEffect, useState } from 'react'
 import { api, SettingItem } from '../api'
 import { PixelButton, PixelCard, PixelMessage, useMessage } from '../components/Pixel'
@@ -35,6 +35,7 @@ export default function SettingsPage() {
     { title: '行情过滤', keys: ['funding_count', 'min_basis_pct', 'min_funding_avg_pct', 'min_quote_volume_24h'] },
     { title: '卖出策略', keys: ['hold_sell_threshold_pct'] },
     { title: '交易执行', keys: ['group_size_usdt', 'atom_size_usdt', 'dust_usdt', 'max_buy_pairs'] },
+    { title: '交易引擎（Maker 挂单追价）', keys: ['order_method', 'orderbook_level', 'max_chase_count', 'chase_to_taker', 'max_net_exposure', 'max_retry'] },
     { title: '自动交易', keys: ['loop_interval_sec', 'auto_trade_enabled'] },
     { title: '资金与杠杆', keys: ['leverage', 'balance_ratio', 'balance_warn_pct'] },
     { title: '邮件通知', keys: ['smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'mail_from', 'mail_to'] },

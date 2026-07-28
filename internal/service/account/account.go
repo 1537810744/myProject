@@ -1,17 +1,18 @@
-// Package account 模块 4：账户信息模块。
+// 【阅读顺序 11】模块 4：账户信息模块（总览部分）。
 //
-// 需求要点：
-//   - 展示 binance 与 gate 各自账户的资金、持仓；
-//   - 聚合账户：总资金、购买力（min(合约账户×杠杆, 现货账户)）；
-//   - 当前持有的对冲交易对、合约实时持仓；
-//   - 程序运行时长。
+// 本文件职责：聚合两个交易所的资金与持仓，给出账户总览（Overview）。
+// 阅读目的：重点记住一个公式——
 //
-// 调用方：前端刷新 / 自动交易模块 / 预警模块。
+//	购买力 = min(合约账户可用 × 杠杆, 现货账户总额)
+//
+// 这是自动交易买入阶段“还有多少钱可以花”的答案（需求文档明确公式）。
+// 单持仓对的详细盈亏聚合在 detail.go（阅读顺序 12）。
 package account
 
 import (
 	"time"
 
+	"deltacrypto/internal/database"
 	"deltacrypto/internal/exchange"
 	"deltacrypto/internal/model"
 	"deltacrypto/internal/service/settings"
@@ -20,6 +21,7 @@ import (
 
 // Service 账户信息模块服务
 type Service struct {
+	db       *database.DB // 资金费流水/收益快照的读写（detail.go）
 	hub      *exchange.Hub
 	settings *settings.Service
 	trade    *trade.Service // 持仓数据来自交易模块落库的 hedge_position 表
@@ -27,8 +29,8 @@ type Service struct {
 }
 
 // New 创建账户信息模块
-func New(hub *exchange.Hub, settings *settings.Service, tradeSvc *trade.Service) *Service {
-	return &Service{hub: hub, settings: settings, trade: tradeSvc, startAt: time.Now()}
+func New(db *database.DB, hub *exchange.Hub, settings *settings.Service, tradeSvc *trade.Service) *Service {
+	return &Service{db: db, hub: hub, settings: settings, trade: tradeSvc, startAt: time.Now()}
 }
 
 // Overview 聚合账户总览（前端账户页 & 自动交易买入判断的核心输入）

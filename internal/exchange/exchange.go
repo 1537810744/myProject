@@ -1,11 +1,17 @@
-// Package exchange 交易所连接抽象层。
+// 【阅读顺序 05】交易所连接抽象层（全文最长，但结构简单）。
 //
-// 设计说明（对应需求文档）：
-//   - “和交易所的连接要抽象化，方便更换交易所”。
-//   - 本层把 ccxt 的调用收敛为项目内统一的 Exchange 类型，
-//     上层模块（行情/交易/账户/预警）只依赖本包，不直接碰 ccxt。
-//   - 当前实例：binance 承担“合约腿”（swap），gate 承担“现货腿”（spot），
-//     如需更换交易所，只需在 newCcxtClient 中增加一个 case。
+// 本文件职责：把 ccxt 的调用收敛为项目内统一的 Exchange 类型 + Hub 管理器。
+// 阅读目的：明白两件事——
+//
+//	1) 为什么要有这一层（需求：“和交易所的连接要抽象化，方便更换交易所”）：
+//	   上层模块（行情/交易/账户/预警）只依赖本包，不直接碰 ccxt；
+//	   换交易所只需改 newCcxtClient 的一个 case。
+//	2) 四条连接的分工：
+//	   Spot/Swap（带凭证，可交易，账户/交易/预警用）
+//	   PublicSpot/PublicSwap（无凭证只读，行情模块用——没配 API 也能看行情）。
+//
+// 阅读提示：文件分六段——接口定义 / 构造 / 公共行情 / 账户 / 交易（含引擎用的
+// 限价单/盘口/撤单）/ Hub 管理器。指针解引用的小工具函数在末尾。
 package exchange
 
 import (
@@ -13,6 +19,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	ccxt "github.com/ccxt/ccxt/go/v4"
 
@@ -35,6 +42,11 @@ type ccxtClient interface {
 	FetchPositions(options ...ccxt.FetchPositionsOptions) ([]ccxt.Position, error)
 	SetLeverage(leverage int64, options ...ccxt.SetLeverageOptions) (map[string]any, error)
 	CreateOrder(symbol string, typeVar string, side string, amount float64, options ...ccxt.CreateOrderOptions) (ccxt.Order, error)
+	// 以下为交易引擎与持仓详情所需（盘口/限价单/撤单/查单/资金费流水）
+	FetchOrderBook(symbol string, options ...ccxt.FetchOrderBookOptions) (ccxt.OrderBook, error)
+	FetchOrder(id string, options ...ccxt.FetchOrderOptions) (ccxt.Order, error)
+	CancelOrder(id string, options ...ccxt.CancelOrderOptions) (ccxt.Order, error)
+	FetchFundingHistory(options ...ccxt.FetchFundingHistoryOptions) ([]ccxt.FundingHistory, error)
 }
 
 // Exchange 项目内统一的交易所连接对象
@@ -223,6 +235,24 @@ func (e *Exchange) FetchUSDTBalance() (free, used, total float64, err error) {
 	return free, used, total, nil
 }
 
+// FetchCurrencyBalance 读取单个币种余额（持仓详情页现货腿要查“币”的数量）
+func (e *Exchange) FetchCurrencyBalance(currency string) (free, used, total float64, err error) {
+	bal, err := e.client.FetchBalance()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if v, ok := bal.Free[currency]; ok {
+		free = f64(v)
+	}
+	if v, ok := bal.Used[currency]; ok {
+		used = f64(v)
+	}
+	if v, ok := bal.Total[currency]; ok {
+		total = f64(v)
+	}
+	return free, used, total, nil
+}
+
 // FetchSwapPositions 拉取全部合约持仓（仅合约腿交易所使用）
 func (e *Exchange) FetchSwapPositions() ([]model.SwapPositionInfo, error) {
 	positions, err := e.client.FetchPositions()
@@ -366,6 +396,147 @@ func (e *Exchange) AmountToPrecision(marketType, baseSymbol string, amount float
 	return amount
 }
 
+// ---------- 交易引擎与持仓详情所需（限价单 / 盘口 / 撤单 / 查单 / 资金费流水） ----------
+
+// CreateLimitOrder 挂限价单（交易引擎的 Maker 模式使用）
+func (e *Exchange) CreateLimitOrder(marketType, baseSymbol, side string, amount, price float64) (string, error) {
+	if amount <= 0 || price <= 0 {
+		return "", errors.New("限价单数量与价格必须大于 0")
+	}
+	symbol := baseSymbol
+	if marketType == "swap" {
+		symbol = BaseToSwap(baseSymbol)
+	}
+	order, err := e.client.CreateOrder(symbol, "limit", side, amount, ccxt.WithCreateOrderPrice(price))
+	if err != nil {
+		return "", err
+	}
+	return str(order.Id), nil
+}
+
+// CancelOrder 撤销指定订单（追价前先撤掉旧挂单）
+func (e *Exchange) CancelOrder(marketType, baseSymbol, orderID string) error {
+	symbol := baseSymbol
+	if marketType == "swap" {
+		symbol = BaseToSwap(baseSymbol)
+	}
+	_, err := e.client.CancelOrder(orderID, ccxt.WithCancelOrderSymbol(symbol))
+	return err
+}
+
+// OrderStatus 订单状态查询结果（引擎轮询成交进度用）
+type OrderStatus struct {
+	Status      string  // open / closed / canceled
+	Filled      float64 // 已成交币数量
+	AvgPrice    float64 // 成交均价
+	Fee         float64 // 手续费数值
+	FeeCurrency string  // 手续费币种
+}
+
+// FetchOrderStatus 查询订单成交进度
+func (e *Exchange) FetchOrderStatus(marketType, baseSymbol, orderID string) (*OrderStatus, error) {
+	symbol := baseSymbol
+	if marketType == "swap" {
+		symbol = BaseToSwap(baseSymbol)
+	}
+	order, err := e.client.FetchOrder(orderID, ccxt.WithFetchOrderSymbol(symbol))
+	if err != nil {
+		return nil, err
+	}
+	// ccxt 的 Fee 结构只有 Rate/Cost 没有币种字段，尝试从原始返回 Info 里挖
+	feeCurrency := ""
+	if feeMap, ok := order.Info["fee"].(map[string]any); ok {
+		if c, ok := feeMap["currency"].(string); ok {
+			feeCurrency = c
+		}
+	}
+	return &OrderStatus{
+		Status:      str(order.Status),
+		Filled:      f64(order.Filled),
+		AvgPrice:    f64(order.Average),
+		Fee:         f64(order.Fee.Cost),
+		FeeCurrency: feeCurrency,
+	}, nil
+}
+
+// FetchLevelPrice 取盘口某侧第 level 档价格（引擎 Maker 挂单/掉档判断用）。
+// side=buy 看买盘 bids（前高后低），side=sell 看卖盘 asks（前低后高）；
+// level 超出盘口深度时取最后一档。
+func (e *Exchange) FetchLevelPrice(marketType, baseSymbol, side string, level int) (float64, error) {
+	symbol := baseSymbol
+	if marketType == "swap" {
+		symbol = BaseToSwap(baseSymbol)
+	}
+	book, err := e.client.FetchOrderBook(symbol)
+	if err != nil {
+		return 0, err
+	}
+	levels := book.Asks
+	if side == "buy" {
+		levels = book.Bids
+	}
+	if len(levels) == 0 {
+		return 0, errors.New("盘口为空")
+	}
+	if level < 1 {
+		level = 1
+	}
+	if level > len(levels) {
+		level = len(levels)
+	}
+	// 盘口档位结构：[价格, 数量]
+	if len(levels[level-1]) == 0 {
+		return 0, errors.New("盘口档位数据异常")
+	}
+	return levels[level-1][0], nil
+}
+
+// IsOutOfLevel 判断我的挂单价是否已“掉出前 N 档”（引擎追价条件）。
+// 买单：挂单价 < 当前第 N 档买价 => 掉出；卖单：挂单价 > 当前第 N 档卖价 => 掉出。
+func (e *Exchange) IsOutOfLevel(marketType, baseSymbol, side string, level int, myPrice float64) (bool, error) {
+	levelPrice, err := e.FetchLevelPrice(marketType, baseSymbol, side, level)
+	if err != nil {
+		return false, err
+	}
+	if side == "buy" {
+		return myPrice < levelPrice, nil
+	}
+	return myPrice > levelPrice, nil
+}
+
+// FundingPayment 一笔资金费结算（持仓详情页“资金费率流水”页签的数据）
+type FundingPayment struct {
+	ID       string    // 交易所侧流水号（去重入库用）
+	Symbol   string    // 内部币对
+	Amount   float64   // 收入为正 / 支出为负（USDT）
+	Time     time.Time // 结算时间
+}
+
+// FetchFundingPayments 拉取账户资金费流水（仅合约腿交易所；需要凭证）
+func (e *Exchange) FetchFundingPayments(baseSymbol string, limit int64) ([]FundingPayment, error) {
+	opts := []ccxt.FetchFundingHistoryOptions{}
+	if baseSymbol != "" {
+		opts = append(opts, ccxt.WithFetchFundingHistorySymbol(BaseToSwap(baseSymbol)))
+	}
+	if limit > 0 {
+		opts = append(opts, ccxt.WithFetchFundingHistoryLimit(limit))
+	}
+	hist, err := e.client.FetchFundingHistory(opts...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FundingPayment, 0, len(hist))
+	for _, h := range hist {
+		out = append(out, FundingPayment{
+			ID:     str(h.Id),
+			Symbol: SwapToBase(str(h.Symbol)),
+			Amount: f64(h.Amount),
+			Time:   time.UnixMilli(i64(h.Timestamp)),
+		})
+	}
+	return out, nil
+}
+
 // FetchLastPrice 获取单个币对最新价（spot 传 BTC/USDT，swap 传 BTC/USDT:USDT）
 func (e *Exchange) FetchLastPrice(marketType, baseSymbol string) (float64, error) {
 	symbol := baseSymbol
@@ -431,17 +602,24 @@ func boolv(p *bool) bool {
 
 // Hub 持有“现货腿 + 合约腿”两条连接，从数据库读取最新 API 凭证构建。
 // 模块 1 保存新凭证后调用 Reload 即可热更新连接，无需重启程序。
+//
+// 另外持有两条【公开连接】（publicSpot/publicSwap）：
+// 行情、资金费率等都是交易所公共接口，不需要 API 凭证。
+// 需求文档第 3 条更新：即使没有配置账户 API，行情模块也必须可用（只是观看）。
 type Hub struct {
 	db   *database.DB
 	mu   sync.RWMutex
-	spot *Exchange // 现货腿交易所（默认 gate）
-	swap *Exchange // 合约腿交易所（默认 binance）
+	spot *Exchange // 现货腿交易所（默认 gate，带凭证，可交易）
+	swap *Exchange // 合约腿交易所（默认 binance，带凭证，可交易）
+	// 公开连接（无凭证，只读公共行情；构建失败不影响启动，调用时返回错误）
+	publicSpot *Exchange
+	publicSwap *Exchange
 	// 角色 -> 交易所 ID 的映射，集中写死在一处，更换交易所只改这里
 	spotID string
 	swapID string
 }
 
-// NewHub 创建管理器（spotID/swapID 留空则默认 gate/binance）
+// NewHub 创建管理器（spotID/swapID 留空则默认 gate/binance），并立即构建公开连接
 func NewHub(db *database.DB, spotID, swapID string) *Hub {
 	if spotID == "" {
 		spotID = "gate"
@@ -449,7 +627,41 @@ func NewHub(db *database.DB, spotID, swapID string) *Hub {
 	if swapID == "" {
 		swapID = "binance"
 	}
-	return &Hub{db: db, spotID: spotID, swapID: swapID}
+	h := &Hub{db: db, spotID: spotID, swapID: swapID}
+	h.initPublic()
+	return h
+}
+
+// initPublic 构建无凭证的公开连接（只用于公共行情接口）。
+// 构建失败（如无网络）不致命：publicXxx 保持 nil，调用方会收到明确错误。
+func (h *Hub) initPublic() {
+	// 空凭证创建：ccxt 公共接口（行情/费率/盘口）不需要 Key
+	if ex, err := New(h.spotID, "spot", "", ""); err == nil {
+		h.publicSpot = ex
+	}
+	if ex, err := New(h.swapID, "swap", "", ""); err == nil {
+		h.publicSwap = ex
+	}
+}
+
+// PublicSpot 现货腿公开连接（行情模块使用，无需配置 API）
+func (h *Hub) PublicSpot() (*Exchange, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.publicSpot == nil {
+		return nil, errors.New("现货公开行情连接不可用（请检查网络）")
+	}
+	return h.publicSpot, nil
+}
+
+// PublicSwap 合约腿公开连接（行情模块使用，无需配置 API）
+func (h *Hub) PublicSwap() (*Exchange, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.publicSwap == nil {
+		return nil, errors.New("合约公开行情连接不可用（请检查网络）")
+	}
+	return h.publicSwap, nil
 }
 
 // Reload 从数据库读取 API 凭证，重建两条连接（凭证变更后调用）

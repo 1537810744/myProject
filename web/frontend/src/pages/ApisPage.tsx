@@ -1,4 +1,4 @@
-// 模块 1：API 配置页 —— 保存凭证、测试连通性/权限、列表管理
+// 【阅读顺序 25a】模块 1：API 配置页 —— 保存凭证、测试连通性/权限、列表管理。
 import { useEffect, useState } from 'react'
 import { api, ExchangeAPI } from '../api'
 import { PixelButton, PixelCard, PixelInput, PixelSelect, PixelMessage, PixelTable, PixelConfirm, useMessage } from '../components/Pixel'

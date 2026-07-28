@@ -1,4 +1,6 @@
-// 应用主框架：像素标题牌 + 页签导航 + 页面容器
+// 【阅读顺序 24】应用主框架：标题牌 + 8 个像素页签 + 页面容器。
+// 本文件职责：用一个 useState 记录当前页签，条件渲染 8 个页面组件。
+// 阅读目的：知道 8 个页签对应 pages/ 下哪个文件，然后按需跳去读某个页面。
 import { useState } from 'react'
 import { PixelButton, SkyDecor } from './components/Pixel'
 import ApisPage from './pages/ApisPage'

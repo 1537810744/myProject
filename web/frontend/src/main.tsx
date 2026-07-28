@@ -1,4 +1,6 @@
-// 前端入口：挂载 React 根组件
+// 【阅读顺序 20】前端入口 —— 前端读代码从这里开始。
+// 本文件职责：引入像素字体与全局样式，把 <App/> 挂载到页面根节点。
+// 阅读路径建议：21 样式系统 → 22 API 层 → 23 像素组件 → 24 App 导航 → 25 各页面。
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'

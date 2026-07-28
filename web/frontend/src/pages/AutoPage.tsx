@@ -1,4 +1,4 @@
-// 模块 6：自动交易页 —— 运行状态 + 手动触发一轮
+// 【阅读顺序 25f】模块 6：自动交易页 —— 运行状态 + 手动触发一轮。
 import { useEffect, useState } from 'react'
 import { api, AutoStatus, fmtTime } from '../api'
 import { PixelButton, PixelCard, StatCard, PixelMessage, useMessage } from '../components/Pixel'

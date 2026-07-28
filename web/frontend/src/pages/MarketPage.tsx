@@ -1,4 +1,4 @@
-// 模块 2：行情页 —— 通过全部约束的优质对冲标的（待买入列表）
+// 【阅读顺序 25b】模块 2：行情页 —— 通过全部约束的优质对冲标的（待买入列表）。
 import { useState } from 'react'
 import { api, MarketCandidate, fmt } from '../api'
 import { PixelButton, PixelCard, PixelTable, PixelMessage, useMessage } from '../components/Pixel'

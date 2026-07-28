@@ -1,4 +1,4 @@
-// 模块 4：账户页 —— 双所资金、聚合总览、合约实时持仓
+// 【阅读顺序 25d】模块 4：账户页 —— 双所资金、聚合总览、合约实时持仓。
 import { useEffect, useState } from 'react'
 import { api, AccountOverview, fmt } from '../api'
 import { PixelButton, PixelCard, PixelTable, StatCard } from '../components/Pixel'

@@ -1,12 +1,15 @@
-// Package trade 模块 3：交易模块（建仓/平仓共用的对冲执行器）。
+// 【阅读顺序 10】模块 3：交易模块（建仓/平仓的统一入口）。
 //
-// 需求要点：
-//   - 填入总量（组容量）与每笔原子交易的量（原子单位），拆成多轮执行；
-//   - 优先腿是现货，对冲腿是合约（两腿对冲，保持 Delta 中性）；
-//   - 粉尘处理：剩余价值低于阈值时一并带走；
-//   - “牛吃草”：每下几笔原子单停顿一下看行情，不抢一秒；
-//   - 下单引擎不自研：底层直接复用 ccxt 的 CreateOrder，
-//     本模块只负责双腿协调、拆单、汇总与落库（持仓表/日志表）。
+// 本文件职责：对外提供 Open/Close 两个入口，内部是“拆单循环”，
+// 每一轮的双腿执行委托给【阅读顺序 09】的引擎（engine.go）。
+// 阅读目的：抓住两条线——
+//
+//	执行线：参数兜底 → 组装引擎 → 拆单循环（总量切原子量、粉尘带走、轮间停顿 1 秒看行情）
+//	落库线：执行中收集成交明细(Fill) → 结束后写持仓表 + trade_fill 成交记录表
+//	         （成交记录是持仓详情页“成交记录/手续费”的数据来源）。
+//
+// 上下游：被 httpserver（手动交易）与 autotrade（自动交易）调用；
+// 持仓表 hedge_position 同时被 account/alert/autotrade 读取。
 package trade
 
 import (
@@ -44,7 +47,13 @@ func (s *Service) Close(req model.TradeRequest, positionID int64) (*model.TradeR
 	return s.execute(req, false, positionID)
 }
 
-// execute 建仓/平仓的统一执行流程（方向由 isOpen 区分）
+// execute 建仓/平仓的统一执行流程（方向由 isOpen 区分）。
+//
+// 执行结构（对应参考方案）：
+//
+//	拆单循环（本函数）：把总量按原子单位切成多轮，逐轮执行，轮间停顿看行情（牛吃草）；
+//	每轮双腿（engine.HedgeOnce）：优先腿现货先走（Maker 挂单追价或 Taker），
+//	  对冲腿合约实时跟进优先腿的成交量，净敞口超阈值自动停止告警。
 func (s *Service) execute(req model.TradeRequest, isOpen bool, positionID int64) (*model.TradeResult, error) {
 	spotEx, err := s.hub.Spot()
 	if err != nil {
@@ -71,7 +80,11 @@ func (s *Service) execute(req model.TradeRequest, isOpen bool, positionID int64)
 		action = "open"
 	}
 	s.log("info", action, req.Symbol,
-		fmt.Sprintf("开始%s：总量 %.2fU，原子 %.2fU", actionName(isOpen), req.TotalUSDT, req.AtomUSDT))
+		fmt.Sprintf("开始%s：总量 %.2fU，原子 %.2fU，下单方式 %s（前%d档，最多追价%d次）",
+			actionName(isOpen), req.TotalUSDT, req.AtomUSDT,
+			s.settings.Get(settings.KeyOrderMethod),
+			s.settings.GetInt(settings.KeyOrderbookLevel),
+			s.settings.GetInt(settings.KeyMaxChaseCount)))
 
 	// 建仓前设置合约杠杆（失败仅警告，不阻断）
 	if isOpen {
@@ -80,6 +93,22 @@ func (s *Service) execute(req model.TradeRequest, isOpen bool, positionID int64)
 			s.log("warn", action, req.Symbol, fmt.Sprintf("设置杠杆 %dx 失败（继续下单）: %v", lev, err))
 		}
 	}
+
+	// —— 组装交易引擎（全部参数来自设置模块，前端设置页可调） ——
+	engine := NewEngine(spotEx, swapEx,
+		EngineConfig{
+			MaxNetExposure: s.settings.GetFloat(settings.KeyMaxNetExposure),
+			MaxRetry:       s.settings.GetInt(settings.KeyMaxRetry),
+			PollInterval:   1 * time.Second, // 订单轮询间隔：低频工具 1 秒
+		},
+		LegConfig{
+			OrderMethod:  s.settings.Get(settings.KeyOrderMethod),
+			Level:        s.settings.GetInt(settings.KeyOrderbookLevel),
+			MaxChase:     s.settings.GetInt(settings.KeyMaxChaseCount),
+			ChaseToTaker: s.settings.GetInt(settings.KeyChaseToTaker) == 1,
+		},
+		s.log,
+	)
 
 	// 以现货最新价折算币数量
 	spotPrice, err := spotEx.FetchLastPrice("spot", req.Symbol)
@@ -91,6 +120,14 @@ func (s *Service) execute(req model.TradeRequest, isOpen bool, positionID int64)
 		SpotLeg:   &model.LegResult{Exchange: spotEx.ID(), MarketType: "spot"},
 		SwapLeg:   &model.LegResult{Exchange: swapEx.ID(), MarketType: "swap"},
 		Timestamp: time.Now(),
+	}
+	// 收集全部成交明细（执行完成后统一写 trade_fill 表，关联持仓）
+	var allFills []Fill
+
+	// 双腿方向：建仓=现货买+合约空；平仓=现货卖+合约买回（reduceOnly）
+	spotSide, swapSide := "buy", "sell"
+	if !isOpen {
+		spotSide, swapSide = "sell", "buy"
 	}
 
 	// —— 拆单循环：牛吃草，吃一口抬头看一眼 ——
@@ -111,43 +148,25 @@ func (s *Service) execute(req model.TradeRequest, isOpen bool, positionID int64)
 			return result, fmt.Errorf("第 %d 轮数量精度换算后为 0，终止", round)
 		}
 
-		// 第 1 腿（优先腿）：现货。建仓买、平仓卖
-		spotSide := "buy"
-		if !isOpen {
-			spotSide = "sell"
+		// 引擎执行本轮双腿（优先腿现货 -> 对冲腿合约实时跟进）
+		spotOut, swapOut, err := engine.HedgeOnce(req.Symbol, spotSide, swapSide, amount, !isOpen)
+		if spotOut != nil {
+			mergeLegOutcome(result.SpotLeg, spotOut)
+			allFills = append(allFills, spotOut.Fills...)
 		}
-		spotOrder, err := spotEx.CreateMarketOrder("spot", req.Symbol, spotSide, amount)
+		if swapOut != nil {
+			mergeLegOutcome(result.SwapLeg, swapOut)
+			allFills = append(allFills, swapOut.Fills...)
+		}
 		if err != nil {
-			s.log("error", action, req.Symbol, fmt.Sprintf("第 %d 轮现货腿(%s)失败: %v", round, spotSide, err))
-			return result, fmt.Errorf("现货腿下单失败: %w", err)
+			// 引擎内部已写明失败原因与净敞口告警；这里直接终止本组执行
+			return result, fmt.Errorf("第 %d 轮执行失败: %w", round, err)
 		}
-		result.SpotLeg.Side = spotSide
-		accumulateLeg(result.SpotLeg, spotOrder)
-
-		// 第 2 腿（对冲腿）：合约。建仓空、平仓买（reduceOnly）
-		swapSide := "sell"
-		if !isOpen {
-			swapSide = "buy"
-		}
-		swapOrder, err := s.createSwapOrder(swapEx, req.Symbol, swapSide, spotOrder.Filled, isOpen)
-		if err != nil {
-			// 合约腿失败 => 产生净敞口！尝试回滚现货腿（把刚成交的现货反向操作回去）
-			s.log("error", action, req.Symbol,
-				fmt.Sprintf("第 %d 轮合约腿失败: %v，尝试回滚现货腿 %.6f", round, err, spotOrder.Filled))
-			if _, rbErr := spotEx.CreateMarketOrder("spot", req.Symbol, swapSide, spotOrder.Filled); rbErr != nil {
-				s.log("error", action, req.Symbol, fmt.Sprintf("现货腿回滚也失败（存在净敞口，请人工处理）: %v", rbErr))
-			} else {
-				s.log("warn", action, req.Symbol, "现货腿已回滚，净敞口已消除")
-			}
-			return result, fmt.Errorf("合约腿下单失败（已尝试回滚现货）: %w", err)
-		}
-		result.SwapLeg.Side = swapSide
-		accumulateLeg(result.SwapLeg, swapOrder)
 
 		remainingUSDT -= roundUSDT
 		s.log("info", action, req.Symbol,
-			fmt.Sprintf("第 %d 轮成交：现货 %s %.6f @ %.6f，合约 %s %.6f @ %.6f",
-				round, spotSide, spotOrder.Filled, spotOrder.AvgPrice, swapSide, swapOrder.Filled, swapOrder.AvgPrice))
+			fmt.Sprintf("第 %d 轮对冲完成：现货成交 %.6f，合约成交 %.6f",
+				round, spotOut.Amount, swapOut.Amount))
 
 		// 牛吃草：抬头看一眼（轮间停顿，低频工具 1 秒足够）
 		if remainingUSDT > 0 {
@@ -159,19 +178,27 @@ func (s *Service) execute(req model.TradeRequest, isOpen bool, positionID int64)
 		}
 	}
 
-	// —— 落库：持仓表 ——
+	// —— 落库：持仓表 + 成交记录表 ——
+	var savedPositionID = positionID
 	if isOpen {
 		basis := 0.0
 		if result.SpotLeg.AvgPrice > 0 {
 			basis = (result.SwapLeg.AvgPrice - result.SpotLeg.AvgPrice) / result.SpotLeg.AvgPrice * 100
 		}
-		if err := s.insertPosition(req, result, basis); err != nil {
+		id, err := s.insertPosition(req, result, basis)
+		if err != nil {
 			s.log("error", action, req.Symbol, "持仓写入数据库失败: "+err.Error())
+		} else {
+			savedPositionID = id
 		}
 	} else if positionID > 0 {
 		if err := s.closePosition(positionID); err != nil {
 			s.log("error", action, req.Symbol, "持仓状态更新失败: "+err.Error())
 		}
+	}
+	// 成交明细写表（持仓详情页“成交记录”页签的数据来源）
+	if err := s.saveFills(savedPositionID, req.Symbol, allFills); err != nil {
+		s.log("error", action, req.Symbol, "成交记录写入失败: "+err.Error())
 	}
 
 	result.Success = true
@@ -183,39 +210,50 @@ func (s *Service) execute(req model.TradeRequest, isOpen bool, positionID int64)
 	return result, nil
 }
 
-// createSwapOrder 合约腿下单；平仓时附带 reduceOnly 确保只减仓不开新仓
-func (s *Service) createSwapOrder(swapEx *exchange.Exchange, symbol, side string, amount float64, isOpen bool) (*exchange.MarketOrderResult, error) {
-	amount = swapEx.AmountToPrecision("swap", symbol, amount)
-	if amount <= 0 {
-		return nil, fmt.Errorf("合约数量精度换算后为 0")
-	}
-	// reduceOnly 由 ccxt 参数透传；市价平仓单附加该参数防止误开反向仓
-	if !isOpen {
-		return swapEx.CreateMarketOrderWithParams(symbol, side, amount, map[string]any{"reduceOnly": true})
-	}
-	return swapEx.CreateMarketOrder("swap", symbol, side, amount)
-}
-
-// accumulateLeg 把一笔成交累计到腿结果中（数量累加、均价按量加权）
-func accumulateLeg(leg *model.LegResult, order *exchange.MarketOrderResult) {
+// mergeLegOutcome 把引擎一轮的腿执行结果合并进 TradeResult 的腿汇总（数量、加权均价、订单号）
+func mergeLegOutcome(leg *model.LegResult, out *LegOutcome) {
 	prevCost := leg.AvgPrice * leg.Amount
-	leg.Amount += order.Filled
-	leg.CostUSDT += order.Cost
+	leg.Amount += out.Amount
+	leg.CostUSDT += out.CostUSDT
 	if leg.Amount > 0 {
-		leg.AvgPrice = (prevCost + order.Cost) / leg.Amount
+		leg.AvgPrice = (prevCost + out.CostUSDT) / leg.Amount
 	}
-	leg.OrderIDs = append(leg.OrderIDs, order.OrderID)
+	leg.Side = out.Fills[len(out.Fills)-1].Side
+	for _, f := range out.Fills {
+		leg.OrderIDs = append(leg.OrderIDs, f.OrderID)
+	}
 }
 
-// insertPosition 建仓成功后写入持仓表
-func (s *Service) insertPosition(req model.TradeRequest, result *model.TradeResult, basisPct float64) error {
-	_, err := s.db.Exec(
+// insertPosition 建仓成功后写入持仓表，返回持仓 ID（成交记录关联用）
+func (s *Service) insertPosition(req model.TradeRequest, result *model.TradeResult, basisPct float64) (int64, error) {
+	res, err := s.db.Exec(
 		`INSERT INTO hedge_position(symbol, spot_exchange, swap_exchange, spot_amount, swap_amount,
 			spot_entry_price, swap_entry_price, entry_basis_pct, status) VALUES(?,?,?,?,?,?,?,?, 'open')`,
 		req.Symbol, result.SpotLeg.Exchange, result.SwapLeg.Exchange,
 		result.SpotLeg.Amount, result.SwapLeg.Amount,
 		result.SpotLeg.AvgPrice, result.SwapLeg.AvgPrice, basisPct)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// saveFills 把一轮执行的成交明细批量写入 trade_fill 表（持仓详情页“成交记录”页签）
+func (s *Service) saveFills(positionID int64, symbol string, fills []Fill) error {
+	for _, f := range fills {
+		maker := 0
+		if f.Maker {
+			maker = 1
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO trade_fill(position_id, symbol, exchange, market_type, side, price, amount,
+				cost_usdt, fee, fee_currency, order_id, maker, traded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			positionID, symbol, f.Exchange, f.MarketType, f.Side, f.Price, f.Amount,
+			f.CostUSDT, f.Fee, f.FeeCurrency, f.OrderID, maker, f.Time); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // closePosition 平仓成功后把持仓置为 closed
@@ -244,6 +282,44 @@ func (s *Service) OpenPositions() ([]model.HedgePosition, error) {
 			return nil, err
 		}
 		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// FeeBySymbol 某币对的手续费合计（只统计 USDT 部分；持仓详情页用）
+func (s *Service) FeeBySymbol(symbol string) (float64, error) {
+	var sum float64
+	err := s.db.QueryRow(
+		`SELECT COALESCE(SUM(fee), 0) FROM trade_fill
+		 WHERE symbol = ? AND (fee_currency = 'USDT' OR fee_currency = 'USD' OR fee_currency = '')`,
+		symbol).Scan(&sum)
+	return sum, err
+}
+
+// Fills 某币对的成交记录（持仓详情页“成交记录”页签）
+func (s *Service) Fills(symbol string, limit int) ([]model.PositionFill, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.Query(
+		`SELECT id, position_id, symbol, exchange, market_type, side, price, amount,
+			cost_usdt, fee, fee_currency, order_id, maker, traded_at
+		 FROM trade_fill WHERE symbol = ? ORDER BY id DESC LIMIT ?`, symbol, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]model.PositionFill, 0)
+	for rows.Next() {
+		var f model.PositionFill
+		var maker int
+		if err := rows.Scan(&f.ID, &f.PositionID, &f.Symbol, &f.Exchange, &f.MarketType,
+			&f.Side, &f.Price, &f.Amount, &f.CostUSDT, &f.Fee, &f.FeeCurrency,
+			&f.OrderID, &maker, &f.TradedAt); err != nil {
+			return nil, err
+		}
+		f.Maker = maker == 1
+		out = append(out, f)
 	}
 	return out, rows.Err()
 }

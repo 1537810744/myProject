@@ -1,8 +1,18 @@
-// 程序入口：装配全部模块，启动自动交易协程与 HTTP 服务。
+// 【阅读顺序 01】程序入口 —— 读代码从这里开始。
+//
+// 本文件职责：只做一件事——把全部模块 New() 出来并接好线（依赖注入根），
+// 然后启动两个 goroutine：
+//   - 主 goroutine    -> HTTP 服务（前端 RESTful API + 静态页面）
+//   - 一个子 goroutine -> 自动交易循环（每 N 秒一轮）
 //
 // 整体形态：单进程 + Goroutine（需求文档明确：不用微服务，简单为本）。
-//   - 主 goroutine   -> HTTP 服务（前端 RESTful API + 静态页面）
-//   - 一个子 goroutine -> 自动交易循环（每 N 秒一轮）
+//
+// 阅读目的：看完本文件，你应该能在脑中画出“谁依赖谁”的全貌——
+// 下游依赖顺序就是代码里的 New 顺序：
+//
+//	config(02) → database(04) → settings(06) → exchange.Hub(05)
+//	→ apiconfig(07) → market(08) → trade(10) → account(11/12) → alert(13) → autotrade(14)
+//	→ httpserver(16) 装配全部对外暴露 REST
 package main
 
 import (
@@ -44,7 +54,7 @@ func main() {
 	apiconfigSvc := apiconfig.New(db, hub)
 	marketSvc := market.New(hub, settingsSvc)
 	tradeSvc := trade.New(db, hub, settingsSvc)
-	accountSvc := account.New(hub, settingsSvc, tradeSvc)
+	accountSvc := account.New(db, hub, settingsSvc, tradeSvc)
 	alertSvc := alert.New(db, hub, settingsSvc, accountSvc, tradeSvc)
 	autotradeSvc := autotrade.New(settingsSvc, marketSvc, tradeSvc, accountSvc, alertSvc)
 

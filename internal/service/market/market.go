@@ -1,14 +1,15 @@
-// Package market 模块 2：行情模块。
+// 【阅读顺序 08】模块 2：行情模块（策略的眼睛）。
 //
-// 需求要点：
-//   - 把币安合约与 Gate 现货取交集，按约束过滤，返回“优质待买入列表”；
-//   - 约束 1：基差 > 0.1%（合约比现货贵）；
-//   - 约束 2：资金费率趋势上升（前 N/2 均值 < 后 N/2 均值）；
-//   - 约束 3：最近 N 次资金费率均值 > 0.05%；
-//   - 约束 4：现货与合约满足流通量约束（24H 合约成交额 > 50K）；
-//   - 所有阈值均来自设置模块（数据库）。
+// 本文件职责：从两个交易所拉公共数据，按四重约束筛出“优质待买入列表”。
+// 阅读目的：重点看 Candidates() 的六步过滤流水线——
 //
-// 调用方：前端刷新 / 自动交易模块（直接包内调用）。
+//	① 拉币安全部 USDT 永续行情 → ② 流通量粗筛（最便宜的条件先过）
+//	③ 与 Gate 现货取交集 → ④ 批量当前费率 → ⑤ 并发拉历史费率做趋势+均值过滤
+//	⑥ 拉现货价算基差做最终过滤。
+//
+// 为什么这样排序：把“一次请求就能筛掉一大片”的条件放前面，把“一币一次请求”
+// 的历史费率放后面且并发——这是“拿全量再筛 vs 调用时就筛”的取舍（需求原文提到可优化）。
+// 注意：本模块全程使用【公开连接】，不配置 API 也能看行情（需求更新第 3 条）。
 package market
 
 import (
@@ -34,12 +35,16 @@ func New(hub *exchange.Hub, settings *settings.Service) *Service {
 
 // Candidates 获取通过全部约束的待买入列表（按当前资金费率降序）。
 // 这是行情模块的核心入口，前端与自动交易模块都调它。
+//
+// 注意：这里使用【公开连接】（PublicSpot/PublicSwap）。
+// 目的（需求更新第 3 条）：行情数据全是交易所公共接口，不需要 API 凭证，
+// 即使还没配置任何账户 Key，用户也能打开行情页查看待买入列表。
 func (s *Service) Candidates() ([]model.MarketCandidate, error) {
-	spotEx, err := s.hub.Spot()
+	spotEx, err := s.hub.PublicSpot()
 	if err != nil {
 		return nil, err
 	}
-	swapEx, err := s.hub.Swap()
+	swapEx, err := s.hub.PublicSwap()
 	if err != nil {
 		return nil, err
 	}
@@ -182,9 +187,9 @@ func (s *Service) Candidates() ([]model.MarketCandidate, error) {
 	return out, nil
 }
 
-// CurrentFundingRate 查询单个币对的当前资金费率（%）（卖出判断用）
+// CurrentFundingRate 查询单个币对的当前资金费率（%）（卖出判断用，走公开连接）
 func (s *Service) CurrentFundingRate(baseSymbol string) (float64, error) {
-	swapEx, err := s.hub.Swap()
+	swapEx, err := s.hub.PublicSwap()
 	if err != nil {
 		return 0, err
 	}
@@ -195,13 +200,13 @@ func (s *Service) CurrentFundingRate(baseSymbol string) (float64, error) {
 	return rates[baseSymbol], nil
 }
 
-// CurrentBasisPct 查询单个币对当前基差（%）（slow sell 判断用）
+// CurrentBasisPct 查询单个币对当前基差（%）（slow sell 判断用，走公开连接）
 func (s *Service) CurrentBasisPct(baseSymbol string) (float64, error) {
-	spotEx, err := s.hub.Spot()
+	spotEx, err := s.hub.PublicSpot()
 	if err != nil {
 		return 0, err
 	}
-	swapEx, err := s.hub.Swap()
+	swapEx, err := s.hub.PublicSwap()
 	if err != nil {
 		return 0, err
 	}

@@ -1,6 +1,9 @@
-// Package model 定义项目内所有模块共用的数据结构。
-// 说明：个人工具不追求严格的 DDD 分层，模型集中放在一个包里，
-// 各模块直接引用，避免循环依赖，简单直观。
+// 【阅读顺序 03】全部数据结构（项目的“词汇表”）。
+//
+// 本文件职责：定义所有模块共用的结构体——凭证/行情/交易/持仓/账户/详情/预警/日志。
+// 阅读目的：后面每看到一个类型，回来这里查字段含义。
+// 为什么集中在一个包：各模块都要引用模型，集中放置可以从根上避免循环依赖
+// （模型包不依赖任何业务包，业务包都依赖它）。
 package model
 
 import "time"
@@ -126,6 +129,83 @@ type AccountOverview struct {
 	Hedges          []HedgePosition    `json:"hedges"`           // 当前持有的对冲对（来自数据库）
 	SwapPositions   []SwapPositionInfo `json:"swap_positions"`   // 合约实时持仓（来自交易所）
 	RunningSince    time.Time          `json:"running_since"`    // 程序本次启动时间（运行时长）
+}
+
+// ---------- 持仓详情（账户模块 · 需求更新第 2 条） ----------
+
+// PositionFill 一笔成交记录（trade_fill 表的行，详情页“成交记录”页签）
+type PositionFill struct {
+	ID          int64     `json:"id"`
+	PositionID  int64     `json:"position_id"`
+	Symbol      string    `json:"symbol"`
+	Exchange    string    `json:"exchange"`
+	MarketType  string    `json:"market_type"` // spot / swap
+	Side        string    `json:"side"`
+	Price       float64   `json:"price"`
+	Amount      float64   `json:"amount"`
+	CostUSDT    float64   `json:"cost_usdt"`
+	Fee         float64   `json:"fee"`
+	FeeCurrency string    `json:"fee_currency"`
+	OrderID     string    `json:"order_id"`
+	Maker       bool      `json:"maker"`
+	TradedAt    time.Time `json:"traded_at"`
+}
+
+// FundingPaymentRecord 一笔资金费结算（funding_payment 表的行，详情页“资金费率流水”页签）
+type FundingPaymentRecord struct {
+	ID       int64     `json:"id"`
+	Exchange string    `json:"exchange"`
+	Symbol   string    `json:"symbol"`
+	Amount   float64   `json:"amount"` // 收入为正 / 支出为负（USDT）
+	IncomeAt time.Time `json:"income_at"`
+}
+
+// PositionDetailStats 持仓详情顶部统计（对应参考图的两排指标卡）
+type PositionDetailStats struct {
+	SwapMarginUsed  float64 `json:"swap_margin_used"`  // 合约占用资金（保证金）
+	SpotCostUsed    float64 `json:"spot_cost_used"`    // 现货占用资金（买入成本）
+	BasisPnl        float64 `json:"basis_pnl"`         // 期现收益（合约浮动盈亏 + 现货浮动盈亏）
+	FundingPnl      float64 `json:"funding_pnl"`       // 费率收益（资金费流水累计）
+	NetProfit       float64 `json:"net_profit"`        // 净收益 = 期现收益 + 费率收益 - 手续费
+	FeeUSDT         float64 `json:"fee_usdt"`          // 手续费合计（USDT 部分）
+	YieldPct        float64 `json:"yield_pct"`         // 收益率 = 净收益 / 总占用
+	AnnualizedPct   float64 `json:"annualized_pct"`    // 年化收益率
+	RunDuration     string  `json:"run_duration"`      // 运行时长（人性化）
+	NetExposure     float64 `json:"net_exposure"`      // 敞口 = |现货量 - 合约量|
+	NextFundingEst  float64 `json:"next_funding_est"`  // 下次费率预估收益（当前费率 × 合约名义价值）
+}
+
+// PositionLegDetail 单条腿的详情（合约腿/现货腿共用结构）
+type PositionLegDetail struct {
+	Exchange       string  `json:"exchange"`
+	Amount         float64 `json:"amount"`          // 持仓数量（币）
+	AvgPrice       float64 `json:"avg_price"`       // 均价（开仓/成本）
+	MarkPrice      float64 `json:"mark_price"`      // 标记价/最新价
+	ValueUSDT      float64 `json:"value_usdt"`      // 持仓价值
+	UnrealizedPnl  float64 `json:"unrealized_pnl"`  // 未实现盈亏
+	RealizedPnl    float64 `json:"realized_pnl"`    // 已实现盈亏
+	NextFundingPct float64 `json:"next_funding_pct"`// 下次费率（%）（仅合约腿）
+	NextSettleAt   string  `json:"next_settle_at"`  // 下次结算时间（仅合约腿）
+	LastSyncAt     string  `json:"last_sync_at"`    // 最后同步时间
+}
+
+// PositionDetail 持仓详情完整聚合（详情接口返回）
+type PositionDetail struct {
+	Symbol     string              `json:"symbol"`
+	Status     string              `json:"status"`
+	Stats      PositionDetailStats `json:"stats"`
+	SwapLeg    PositionLegDetail   `json:"swap_leg"`  // 合约腿
+	SpotLeg    PositionLegDetail   `json:"spot_leg"`  // 现货腿
+	Exposure   map[string]float64  `json:"exposure"`  // 敞口分析：合约持仓/现货持仓/净敞口
+}
+
+// ProfitPoint 收益曲线的一个点（profit_snapshot 表，详情页“收益曲线”页签）
+type ProfitPoint struct {
+	Time       time.Time `json:"time"`
+	NetProfit  float64   `json:"net_profit"`  // 净收益
+	BasisPnl   float64   `json:"basis_pnl"`   // 期现收益
+	FundingCum float64   `json:"funding_cum"` // 费率累计
+	FeeCum     float64   `json:"fee_cum"`     // 手续费累计
 }
 
 // ---------- 预警（模块 5） ----------

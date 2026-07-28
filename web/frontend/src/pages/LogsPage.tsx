@@ -1,4 +1,4 @@
-// 日志页 —— 交易 / 自动交易 / 预警 统一操作日志（像素终端风格）
+// 【阅读顺序 25h】日志页 —— 交易 / 自动交易 / 预警 统一操作日志（像素终端风格）。
 import { useEffect, useState } from 'react'
 import { api, TradeLog, fmtTime } from '../api'
 import { PixelButton, PixelCard, PixelTable } from '../components/Pixel'

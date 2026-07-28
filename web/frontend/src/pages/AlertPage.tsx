@@ -1,4 +1,4 @@
-// 模块 5：预警页 —— 预警记录 + 手动触发检查
+// 【阅读顺序 25e】模块 5：预警页 —— 预警记录 + 手动触发检查。
 import { useEffect, useState } from 'react'
 import { api, AlertRecord, fmtTime } from '../api'
 import { PixelButton, PixelCard, PixelTable, PixelMessage, useMessage } from '../components/Pixel'

@@ -1,5 +1,7 @@
-// API 层：与 Go 后端 RESTful 接口一一对应
-// 后端统一返回 { data: ... } 或 { error: ... }
+// 【阅读顺序 22】API 层：前端与 Go 后端的全部对话都在这里。
+// 阅读目的：上半部分是 TS 类型（与后端 model 包一一对应），下半部分是
+// 按模块分组的请求方法（api.xxx）。后端统一返回 { data } 或 { error }；
+// requestList 把空表场景后端返回的 null 统一兜底为空数组，防止 .map 崩溃。
 
 // ---------- 类型定义（与后端 model 包对应） ----------
 
@@ -130,6 +132,77 @@ export interface AutoStatus {
   last_summary: string
 }
 
+// ---------- 持仓详情（账户模块） ----------
+
+export interface PositionFill {
+  id: number
+  position_id: number
+  symbol: string
+  exchange: string
+  market_type: string
+  side: string
+  price: number
+  amount: number
+  cost_usdt: number
+  fee: number
+  fee_currency: string
+  order_id: string
+  maker: boolean
+  traded_at: string
+}
+
+export interface FundingPaymentRecord {
+  id: number
+  exchange: string
+  symbol: string
+  amount: number
+  income_at: string
+}
+
+export interface PositionDetailStats {
+  swap_margin_used: number
+  spot_cost_used: number
+  basis_pnl: number
+  funding_pnl: number
+  net_profit: number
+  fee_usdt: number
+  yield_pct: number
+  annualized_pct: number
+  run_duration: string
+  net_exposure: number
+  next_funding_est: number
+}
+
+export interface PositionLegDetail {
+  exchange: string
+  amount: number
+  avg_price: number
+  mark_price: number
+  value_usdt: number
+  unrealized_pnl: number
+  realized_pnl: number
+  next_funding_pct: number
+  next_settle_at: string
+  last_sync_at: string
+}
+
+export interface PositionDetail {
+  symbol: string
+  status: string
+  stats: PositionDetailStats
+  swap_leg: PositionLegDetail
+  spot_leg: PositionLegDetail
+  exposure: { swap_amount: number; spot_amount: number; net_exposure: number }
+}
+
+export interface ProfitPoint {
+  time: string
+  net_profit: number
+  basis_pnl: number
+  funding_cum: number
+  fee_cum: number
+}
+
 // ---------- 请求封装 ----------
 
 async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
@@ -170,6 +243,10 @@ export const api = {
 
   // 模块 4：账户
   overview: () => request<AccountOverview>('/api/account/overview'),
+  positionDetail: (symbol: string) => request<PositionDetail>(`/api/position/detail?symbol=${encodeURIComponent(symbol)}`),
+  positionFills: (symbol: string) => requestList<PositionFill>(`/api/position/fills?symbol=${encodeURIComponent(symbol)}`),
+  positionFunding: (symbol: string) => requestList<FundingPaymentRecord>(`/api/position/funding?symbol=${encodeURIComponent(symbol)}`),
+  positionProfit: (symbol: string) => requestList<ProfitPoint>(`/api/position/profit?symbol=${encodeURIComponent(symbol)}`),
 
   // 模块 5：预警
   alertRecords: () => requestList<AlertRecord>('/api/alert/records'),

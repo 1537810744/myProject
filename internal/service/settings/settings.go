@@ -1,12 +1,9 @@
-// Package settings 模块 7：设置模块。
+// 【阅读顺序 06】设置模块（所有模块的“参数中心”）。
 //
-// 需求要点：
-//   - 在前端页面设置值，存入数据库；
-//   - 其他所有模块从数据库中读取参数；
-//   - 所有参数都要在前端显示出来，不隐藏。
-//
-// 实现：settings 表是纯键值对（key -> string），
-// 本模块负责“声明全部参数的 key、默认值、中文说明”，并提供类型化读取。
+// 本文件职责：声明全部可调参数（key/默认值/中文说明），读写 settings 表。
+// 阅读目的：项目有哪些旋钮可以调，全在 AllParams 列表里——
+// 加新参数只需在列表追加一行，前端设置页自动渲染出来（需求：参数不隐藏）。
+// 上下游：被几乎所有模块依赖（它们每次用参数时实时 Get，改完即时生效）。
 package settings
 
 import (
@@ -36,6 +33,13 @@ var AllParams = []ParamMeta{
 	{KeyAtomSizeUSDT, "5", "原子单位：每笔原子交易的名义价值（U）"},
 	{KeyDustUSDT, "5", "粉尘阈值：剩余低于此值（U）一并带走"},
 	{KeyMaxBuyPairs, "3", "买入阶段最多分散的交易对数量"},
+	// —— 交易引擎（模块 3 的下单引擎参数，参考成熟方案）——
+	{KeyOrderMethod, "maker", "下单方式：maker=限价挂单追价 / taker=市价直接成交"},
+	{KeyOrderbookLevel, "3", "盘口档位：Maker 挂单落在前 N 档，掉出自动追价到第 1 档"},
+	{KeyMaxChaseCount, "50", "最大追价次数：超过后按下面开关处理"},
+	{KeyChaseToTaker, "1", "追价超限转 Taker：1 开（市价保证成交）/ 0 关（报错停止）"},
+	{KeyMaxNetExposure, "0", "最大净敞口（币数量）：0 不限，超出自动停止并告警"},
+	{KeyMaxRetry, "3", "下单失败最大重试次数"},
 	// —— 自动交易（模块 6）——
 	{KeyLoopIntervalSec, "15", "自动交易轮询间隔（秒）"},
 	{KeyAutoTradeEnabled, "0", "自动交易总开关：1 开 / 0 关"},
@@ -63,6 +67,12 @@ const (
 	KeyAtomSizeUSDT         = "atom_size_usdt"
 	KeyDustUSDT             = "dust_usdt"
 	KeyMaxBuyPairs          = "max_buy_pairs"
+	KeyOrderMethod          = "order_method"
+	KeyOrderbookLevel       = "orderbook_level"
+	KeyMaxChaseCount        = "max_chase_count"
+	KeyChaseToTaker         = "chase_to_taker"
+	KeyMaxNetExposure       = "max_net_exposure"
+	KeyMaxRetry             = "max_retry"
 	KeyLoopIntervalSec      = "loop_interval_sec"
 	KeyAutoTradeEnabled     = "auto_trade_enabled"
 	KeyLeverage             = "leverage"

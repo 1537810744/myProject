@@ -1,8 +1,9 @@
-// Package apiconfig 模块 1：API 配置模块。
+// 【阅读顺序 07】模块 1：API 配置。
 //
-// 需求要点：
-//   - 前端传入交易所 API key/secret，保存到数据库；
-//   - 测试交易所的 API 连通性与权限可行性，返回验证结果给前端展示。
+// 本文件职责：保存交易所 Key/Secret 到数据库（每所留最新一条，列表接口脱敏），
+// 以及“测试连接”——临时建连验证公共连通性（FetchTime）与私有权限（FetchBalance）。
+// 阅读目的：明白凭证从哪来、如何生效——Save 后会调用 hub.Reload() 热更新连接，
+// 所以不用重启程序。
 package apiconfig
 
 import (

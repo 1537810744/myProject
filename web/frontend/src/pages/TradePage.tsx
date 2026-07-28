@@ -1,7 +1,8 @@
-// 模块 3：交易页 —— 手动建仓/平仓 + 当前对冲持仓
+// 【阅读顺序 25c】模块 3：交易页 —— 手动建仓/平仓 + 当前对冲持仓（点“详情”进入持仓详情页）。
 import { useEffect, useState } from 'react'
 import { api, HedgePosition, fmt } from '../api'
 import { PixelButton, PixelCard, PixelInput, PixelMessage, PixelTable, PixelConfirm, useMessage } from '../components/Pixel'
+import PositionDetailPage from './PositionDetail'
 
 export default function TradePage() {
   const [symbol, setSymbol] = useState('')
@@ -11,6 +12,7 @@ export default function TradePage() {
   const [msg, showMsg] = useMessage()
   const [busy, setBusy] = useState(false)
   const [closing, setClosing] = useState<HedgePosition | null>(null)
+  const [detailSymbol, setDetailSymbol] = useState('') // 非空时显示持仓详情页
 
   const loadPositions = () =>
     api.overview().then((ov) => setPositions(ov.hedges || [])).catch(() => {})
@@ -49,9 +51,14 @@ export default function TradePage() {
     }
   }
 
+  // 详情模式：直接渲染持仓详情页（返回按钮清空 detailSymbol）
+  if (detailSymbol) {
+    return <PositionDetailPage symbol={detailSymbol} onBack={() => { setDetailSymbol(''); loadPositions() }} />
+  }
+
   return (
     <>
-      <PixelCard title="手动对冲交易（建仓 = 买现货 + 空合约；双腿市价单）">
+      <PixelCard title="手动对冲交易（建仓 = 买现货 + 空合约；下单方式在设置页配置 Maker/Taker）">
         <div className="form-grid">
           <PixelInput label="币对（如 BTC/USDT）" value={symbol} onChange={setSymbol} placeholder="BTC/USDT" />
           <PixelInput label="总量 USDT（留空读设置）" value={total} onChange={setTotal} placeholder="50" type="number" />
@@ -79,7 +86,10 @@ export default function TradePage() {
                 <td className="num">{fmt(p.swap_entry_price, 6)}</td>
                 <td className="pos">{fmt(p.entry_basis_pct)}%</td>
                 <td className="muted">{p.opened_at}</td>
-                <td><PixelButton variant="error" onClick={() => setClosing(p)}>平仓</PixelButton></td>
+                <td style={{ display: 'flex', gap: 6 }}>
+                  <PixelButton variant="primary" onClick={() => setDetailSymbol(p.symbol)}>详情</PixelButton>
+                  <PixelButton variant="error" onClick={() => setClosing(p)}>平仓</PixelButton>
+                </td>
               </tr>
             ))}
             {positions.length === 0 && <tr><td colSpan={9} className="muted">暂无持仓</td></tr>}
