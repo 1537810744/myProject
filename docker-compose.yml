@@ -11,6 +11,11 @@ services:
       - LISTEN_ADDR=0.0.0.0:8080
       - DB_PATH=/app/data/deltacrypto.db
       - TZ=Asia/Shanghai
+      # 安全（可选但强烈建议）：
+      # MASTER_KEY  : 自定义主密钥，用于加密存储的 API Secret。不设则自动生成到 data/master.key。
+      # AUTH_TOKEN  : 设置后所有 /api/* 请求需带 Authorization: Bearer <AUTH_TOKEN>。
+      # - MASTER_KEY=change-me-to-a-long-random-string
+      # - AUTH_TOKEN=change-me
     restart: unless-stopped
 
 volumes:

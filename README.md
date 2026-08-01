@@ -1,4 +1,4 @@
-# DeltaCrypto · 超低频资金费率 + 基差套利工具
+﻿# DeltaCrypto · 超低频资金费率 + 基差套利工具
 
 一个**个人使用**的量化小工具：在 **Binance 做空永续合约**、在 **Gate 做多现货**，赚取资金费率与基差收敛的收益。
 
@@ -303,7 +303,49 @@ myProject/
 
 ---
 
-## 6. 七大模块说明
+## 6. 代码导读地图（读代码从这里入手）
+
+每个源文件的**头部注释都标注了【阅读顺序 NN】**，按编号顺序读即可从零看懂整个项目。
+每一篇头部注释都回答了三个问题：**这个文件是干什么的 / 读完你应该明白什么 / 重点看哪几段**。
+
+### 后端（Go）
+
+| 顺序 | 文件 | 一句话职责 | 读完应明白 |
+|---|---|---|---|
+| 01 | `cmd/server/main.go` | 模块装配（依赖注入根） | 谁依赖谁的全貌 |
+| 02 | `internal/config/config.go` | 环境变量 | 有哪些环境开关 |
+| 03 | `internal/model/model.go` | 全部数据结构 | 项目的“词汇表” |
+| 04 | `internal/database/db.go` | SQLite 连接与建表 | 数据存在哪、表结构 |
+| 05 | `internal/exchange/exchange.go` | ccxt 抽象层 + 连接管理器 | 四条连接的分工、怎么换交易所 |
+| 06 | `internal/service/settings/settings.go` | 参数中心 | 所有旋钮都在 `AllParams` |
+| 07 | `internal/service/apiconfig/apiconfig.go` | API 凭证与测试 | 凭证如何生效（热更新） |
+| 08 | `internal/service/market/market.go` | 行情四重过滤 | 六步过滤流水线（全程公开连接） |
+| 09 | `internal/service/trade/engine.go` | ⭐ 双腿对冲引擎 | Maker 挂单/掉档追价/转 Taker/净敞口 |
+| 10 | `internal/service/trade/trade.go` | 交易入口与拆单循环 | 执行线 + 落库线 |
+| 11 | `internal/service/account/account.go` | 账户总览 | 购买力公式 min(合约×杠杆, 现货) |
+| 12 | `internal/service/account/detail.go` | ⭐ 持仓详情聚合 | 每个对冲对到底赚不赚钱 |
+| 13 | `internal/service/alert/alert.go` | 四类预警 | fire() 管线：去重→写库→邮件 |
+| 14 | `internal/service/autotrade/autotrade.go` | ⭐ 自动交易大脑 | 需求原文的逐句翻译 |
+| 15 | `internal/notify/mail.go` | SMTP 发邮件 | 一分钟看完 |
+| 16 | `internal/httpserver/server.go` | RESTful API | 路由表 = URL → 模块方法 |
+
+### 前端（React + TS）
+
+| 顺序 | 文件 | 一句话职责 |
+|---|---|---|
+| 20 | `web/frontend/src/main.tsx` | 入口：字体/样式/挂载 |
+| 21 | `web/frontend/src/styles/pixel.css` | 像素风设计系统（三个样式机关） |
+| 22 | `web/frontend/src/api.ts` | 与后端的全部对话（类型 + 请求） |
+| 23 | `web/frontend/src/components/Pixel.tsx` | 像素组件积木 |
+| 24 | `web/frontend/src/App.tsx` | 8 个页签的导航 |
+| 25a-h | `web/frontend/src/pages/*.tsx` | 8 个页面（与 7 大模块 + 日志对应） |
+| 26 | `web/frontend/src/pages/PositionDetail.tsx` | 持仓详情页（统计/双腿/敞口/三页签） |
+
+> ⭐ = 项目灵魂所在，时间有限就先读这三篇：09（怎么下单）、12（怎么算账）、14（怎么自动跑）。
+
+---
+
+## 7. 七大模块说明
 
 ### ① API 配置模块（`apiconfig`）
 - 前端提交 `交易所 + Key + Secret` → 存 SQLite（每个所保留最新一条，Secret 在列表接口中脱敏）。
@@ -318,18 +360,27 @@ myProject/
   4. **基差 > 0.1%**（合约比现货贵）。
 - 输出按当前费率降序，前端表格与自动交易买入共用此列表。
 
-### ③ 交易模块（`trade`）
-- **双腿对冲执行器**：现货腿（优先腿，gate）+ 合约腿（对冲腿，binance），市价单。
+### ③ 交易模块（`trade` + `trade/engine`）
+- **双腿对冲执行引擎**（升级后，参考成熟方案）：
+  - **优先腿（现货）先执行，对冲腿（合约）实时跟进**优先腿成交量，保持 Delta 中性；
+  - **Maker 模式**：限价单挂在盘口前 N 档（默认第 3 档），**掉出前 N 档自动撤单追价到第 1 档**；
+  - **最大追价次数**（默认 50）超过后**自动转 Taker** 市价吃单，保证成交；
+  - **最大净敞口**：两腿成交量差超阈值自动停止并告警（0=不限）；
+  - **最大重试**：下单类失败最多重试 3 次；
+  - Taker 模式保留为可选项与兜底（设置页 `order_method` 切换）。
 - 总量拆成原子单位逐轮执行；**粉尘处理**（剩余 < 阈值一并带走）；**轮间停顿 1s 并刷新价格**（牛吃草）。
-- 合约腿失败 → **自动回滚现货腿**，消除净敞口，并写 error 日志。
 - 平仓单带 `reduceOnly`，防止误开反向仓。
-- 建仓成功写 `hedge_position`（记录入场基差，slow sell 要用）；平仓置 `closed`。
-- 下单引擎不自研：底层就是 ccxt 的 `CreateOrder`，本模块只做双腿协调。
+- 建仓成功写 `hedge_position`（记录入场基差，slow sell 要用）；平仓置 `closed`；
+  **每笔成交写 `trade_fill`**（成交记录/手续费统计的数据来源）。
 
-### ④ 账户信息模块（`account`）
+### ④ 账户信息模块（`account` + `account/detail`）
 - 双所 USDT 资金（可用/冻结/总额）、聚合总资金。
 - **购买力 = min(合约账户 × 杠杆, 现货账户)**（需求文档明确公式）。
 - 当前对冲持仓（数据库）+ 合约实时持仓（含强平价）+ 运行时长。
+- **持仓详情聚合**（`detail.go`，升级后）：每个对冲对的
+  合约/现货占用资金、期现收益、费率收益、净收益、手续费、收益率、年化、
+  运行时长、敞口、下次费率预估、双腿明细、敞口分析，
+  以及成交记录/资金费流水/收益曲线三组数据（详见前端持仓详情页）。
 
 ### ⑤ 预警模块（`alert`）
 - 每轮检查（也可前端手动触发）：
@@ -350,7 +401,7 @@ myProject/
 
 ---
 
-## 7. 数据库表结构
+## 8. 数据库表结构
 
 | 表 | 用途 | 关键字段 |
 |---|---|---|
@@ -359,12 +410,15 @@ myProject/
 | `hedge_position` | 对冲持仓（模块③写入，④⑤⑥读取） | symbol, spot/swap_amount, 双边均价, entry_basis_pct, status(open/closed) |
 | `trade_log` | 操作日志（③⑤⑥写入，前端日志页） | module, level, action, symbol, message |
 | `alert_log` | 预警记录（模块⑤） | type, symbol, level, message, mail_sent |
+| `trade_fill` | 成交记录（引擎写入，持仓详情页“成交记录”） | position_id, exchange, market_type, side, price, amount, fee, maker |
+| `funding_payment` | 资金费流水（从交易所同步，“资金费率流水”页签） | exchange, symbol, amount, income_at（联合唯一去重） |
+| `profit_snapshot` | 收益快照（自动交易每轮记录，“收益曲线”页签） | symbol, net_profit, basis_pnl, funding_cum, fee_cum, ts |
 
 > SQLite 开了 WAL 模式；单连接写入（`SetMaxOpenConns(1)`）避免文件锁冲突。
 
 ---
 
-## 8. RESTful API 一览
+## 9. RESTful API 一览
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -372,11 +426,15 @@ myProject/
 | POST | `/api/config/apis` | 保存凭证（热更新连接） |
 | DELETE | `/api/config/apis/{exchange}` | 删除凭证 |
 | POST | `/api/config/test` | 测试连通性/权限 |
-| GET | `/api/market/candidates` | 待买入列表（四重约束过滤后） |
+| GET | `/api/market/candidates` | 待买入列表（四重约束过滤后，**无需配置 API**） |
 | POST | `/api/trade/open` | 手动建仓 `{symbol, total_usdt?, atom_usdt?}` |
 | POST | `/api/trade/close` | 手动平仓 `{symbol, position_id?}` |
 | GET | `/api/trade/logs` | 最近 200 条日志 |
 | GET | `/api/account/overview` | 账户总览 |
+| GET | `/api/position/detail?symbol=` | 持仓详情（统计+双腿+敞口） |
+| GET | `/api/position/fills?symbol=` | 该币对成交记录 |
+| GET | `/api/position/funding?symbol=` | 该币对资金费流水 |
+| GET | `/api/position/profit?symbol=` | 该币对收益曲线（快照序列） |
 | GET | `/api/alert/records` | 预警记录 |
 | POST | `/api/alert/check` | 立即检查一轮预警 |
 | GET | `/api/autotrade/status` | 自动交易状态 |
@@ -385,7 +443,7 @@ myProject/
 
 ---
 
-## 9. 全部可调参数
+## 10. 全部可调参数
 
 （设置页可见，括号内为默认值）
 
@@ -400,6 +458,12 @@ myProject/
 | `atom_size_usdt` | 5 | 原子单位（U） |
 | `dust_usdt` | 5 | 粉尘阈值（U） |
 | `max_buy_pairs` | 3 | 最多分散买入对数 |
+| **`order_method`** | maker | 下单方式：maker=限价挂单追价 / taker=市价 |
+| **`orderbook_level`** | 3 | 盘口档位：挂前 N 档，掉出追价到第 1 档 |
+| **`max_chase_count`** | 50 | 最大追价次数 |
+| **`chase_to_taker`** | 1 | 追价超限转 Taker（市价保证成交） |
+| **`max_net_exposure`** | 0 | 最大净敞口（币），0=不限，超出自动停止 |
+| **`max_retry`** | 3 | 下单失败最大重试次数 |
 | `loop_interval_sec` | 15 | 自动交易间隔（秒） |
 | `auto_trade_enabled` | 0 | 自动交易总开关 |
 | `leverage` | 4 | 合约杠杆 |
@@ -409,7 +473,7 @@ myProject/
 
 ---
 
-## 10. 典型使用流程
+## 11. 典型使用流程
 
 ```
 1. 启动容器/程序，浏览器打开 http://localhost:8080
@@ -424,14 +488,17 @@ myProject/
 
 ---
 
-## 11. 设计决策与取舍
+## 12. 设计决策与取舍
 
 | 决策 | 理由（对应需求文档） |
 |---|---|
 | 单进程 + 2 goroutine | “个人开发个人使用，不要微服务” |
 | 无 JWT、监听 localhost | “前端无需跨域，简单本机即可”（容器环境由 Docker 网络隔离） |
 | SQLite + 纯 Go 驱动 | 零运维、免 CGO、镜像小、备份就是拷文件 |
-| 市价单而非 Maker 前 3 档追价 | “延迟几秒都能接受”；市价单双腿秒级成对成交，**净敞口时间最短**，代码量少一个数量级 |
+| 引擎默认 Maker 前 3 档 + 追价 + 超限转 Taker | 更新文档第 1 条：参考成熟方案，吃挂单费优惠与价格优势；保留 Taker 一键切换 |
+| 行情模块走公开连接 | 更新文档第 3 条：没配 API 也能看行情（只读公共数据） |
+| 成交记录/资金费流水/收益快照落库 | 更新文档第 2 条：支撑持仓详情页的三大页签 |
+| 全部文件标注【阅读顺序 NN】 | 更新文档第 4 条：新人按编号从零读懂项目 |
 | 一个持仓 = 一组 50U | 让“卖出 50U 下取整”天然等价于“平掉一个持仓”，slow/fast sell 逻辑大幅简化 |
 | ccxt 而非自研 REST 封装 | 需求指定；交易所细节（签名/精度/参数）由 ccxt 兜底 |
 | 交易所抽象层 + Hub | “连接要抽象化，方便更换交易所”：换所只改 `newCcxtClient` 一处 |
@@ -440,7 +507,7 @@ myProject/
 
 ---
 
-## 12. 风险提示
+## 13. 风险提示
 
 - **本工具不构成投资建议**，量化套利存在：费率反转、基差走扩、强平、ADL、交易所宕机、API 故障等风险。
 - 首次使用务必**小资金试跑**，确认两腿成交正常后再放大。
